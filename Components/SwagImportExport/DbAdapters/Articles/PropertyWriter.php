@@ -279,12 +279,12 @@ class PropertyWriter
     /**
      * @param string|int $articleId
      *
-     * @return string|bool
+     * @return array|bool
      */
     private function getGroupFromArticle($articleId)
     {
-        return $this->connection->fetchColumn(
-            'SELECT `filtergroupID` FROM s_articles
+        return $this->connection->fetchAssoc(
+            'SELECT s_filter.id, s_filter.name FROM s_articles
              INNER JOIN s_filter ON s_articles.filtergroupID = s_filter.id
              WHERE s_articles.id = ?',
             [$articleId]
@@ -364,18 +364,23 @@ class PropertyWriter
      */
     private function findCreateOrUpdateGroup($articleId, $propertyData)
     {
-        $filterGroupId = $this->getGroupFromArticle($articleId);
-
-        if (!$filterGroupId && $propertyData['propertyGroupName']) {
-            $fitlerGroupName = $propertyData['propertyGroupName'];
-            $filterGroupId = $this->getFilterGroupIdByNameFromCacheProperty($fitlerGroupName);
-
-            if (!$filterGroupId) {
-                $filterGroupId = $this->createGroup($fitlerGroupName);
-            }
-
-            $this->updateGroupsRelation($filterGroupId, $articleId);
+        $filterGroup = $this->getGroupFromArticle($articleId);
+        $filterGroupName = $propertyData['propertyGroupName'];
+        if (!$filterGroupName) {
+            return $filterGroup ? $filterGroup['id'] : null;
         }
+
+        if ($filterGroup && $filterGroup['name'] === $filterGroupName) {
+            return $filterGroup['id'];
+        }
+
+        $filterGroupId = $this->getFilterGroupIdByNameFromCacheProperty($filterGroupName);
+
+        if (!$filterGroupId) {
+            $filterGroupId = $this->createGroup($filterGroupName);
+        }
+
+        $this->updateGroupsRelation($filterGroupId, $articleId);
 
         return $filterGroupId;
     }
