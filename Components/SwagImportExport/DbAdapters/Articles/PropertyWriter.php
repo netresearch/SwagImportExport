@@ -89,10 +89,11 @@ class PropertyWriter
     public function writeUpdateCreatePropertyGroupsFilterAndValues($articleId, $orderNumber, $propertiesData)
     {
         if (!$propertiesData) {
+            $this->deleteValueRelations($articleId);
             return;
         }
         $optionRelationInsertStatements = [];
-        $valueRelationInsertStatements = [];
+        $valueIds = [];
 
         foreach ($propertiesData as $propertyData) {
             $filterGroupId = $this->findCreateOrUpdateGroup($articleId, $propertyData);
@@ -114,7 +115,7 @@ class PropertyWriter
                 }
 
                 $optionRelationInsertStatements[] = "($optionId, $filterGroupId)";
-                $valueRelationInsertStatements[] = "($valueId, $articleId)";
+                $valueIds[] = $valueId;
                 continue;
             }
 
@@ -125,7 +126,7 @@ class PropertyWriter
                 list($optionId, $valueId) = $this->updateOrCreateOptionAndValuesByValueName($orderNumber, $propertyData);
 
                 $optionRelationInsertStatements[] = "($optionId, $filterGroupId)";
-                $valueRelationInsertStatements[] = "($valueId, $articleId)";
+                $valueIds[] = $valueId;
                 continue;
             }
         }
@@ -134,9 +135,7 @@ class PropertyWriter
             $this->insertOrUpdateOptionRelations($optionRelationInsertStatements);
         }
 
-        if ($valueRelationInsertStatements) {
-            $this->insertOrUpdateValueRelations($valueRelationInsertStatements);
-        }
+        $this->insertUpdateOrRemoveValueRelations($articleId, $valueIds);
     }
 
     /**
@@ -175,18 +174,42 @@ class PropertyWriter
 
     /**
      * Updates/Creates relation between articles and property values
+     *
+     * @param int|string $articleId
+     * @param array $valueIds
      */
-    private function insertOrUpdateValueRelations(array $relations)
+    private function insertUpdateOrRemoveValueRelations($articleId, array $valueIds)
     {
-        $values = implode(',', $relations);
+        if (!$valueIds) {
+            $this->deleteValueRelations($articleId);
+            return;
+        }
+
+        $values = implode(',', array_map(function ($valueId) use ($articleId) {
+            return "({$valueId}, {$articleId})";
+        }, $valueIds));
+
+        $retainValueIds = implode(',', $valueIds);
 
         $sql = "
+            DELETE FROM s_filter_articles WHERE articleID = $articleId AND valueID NOT IN ($retainValueIds);
+            
             INSERT INTO s_filter_articles (valueID, articleID)
             VALUES $values
             ON DUPLICATE KEY UPDATE articleID=VALUES(articleID), valueID=VALUES(valueID)
         ";
 
         $this->connection->exec($sql);
+    }
+
+    /**
+     * Deletes the relation between articles and property values
+     *
+     * @param int|string $articleId
+     */
+    private function deleteValueRelations($articleId)
+    {
+        $this->db->query("DELETE FROM s_filter_articles WHERE articleID = ?", [$articleId]);
     }
 
     /**
