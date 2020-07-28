@@ -39,6 +39,11 @@ class CategoryWriter
     private $eventManager;
 
     /**
+     * @var CategorySubscriber
+     */
+    private $categorySubscriber;
+
+    /**
      * initialises the class properties
      */
     public function __construct()
@@ -46,21 +51,44 @@ class CategoryWriter
         $this->db = Shopware()->Db();
         $this->connection = Shopware()->Models()->getConnection();
         $this->eventManager = Shopware()->Events();
+
+        /** @noinspection PhpUndefinedMethodInspection */
+        $this->categorySubscriber = Shopware()->CategorySubscriber();
     }
 
     /**
      * @param string $articleId
      * @param array  $categories
-     *
      * @throws DBALException
      */
     public function write($articleId, $categories)
     {
-        if (!$categories) {
+        $newIds = $this->prepareValues($categories);
+        $presentIds = $this->db->fetchCol("SELECT categoryId FROM s_articles_categories WHERE articleID = ?", $articleId);
+
+        $this->addCategoryAssignments($articleId, array_diff($newIds, $presentIds));
+        $this->removeCategoryAssignments($articleId, array_diff($presentIds, $newIds));
+    }
+
+    /**
+     * Add new category assignments
+     *
+     * @param $articleId
+     * @param array $categoryIds
+     * @throws DBALException
+     */
+    protected function addCategoryAssignments($articleId, array $categoryIds)
+    {
+        if (!$categoryIds) {
             return;
         }
 
-        $values = $this->prepareValues($categories, $articleId);
+        $values = implode(', ', array_map(
+            function ($catId) use ($articleId) {
+                return "({$articleId}, {$catId})";
+            },
+            $categoryIds
+        ));
 
         $values = $this->eventManager->filter(
             'Shopware_Components_SwagImportExport_DbAdapters_Articles_CategoryWriter_Write',
@@ -68,20 +96,48 @@ class CategoryWriter
             ['subject' => $this]
         );
 
-        $sql = "
+        // Duplicate key shouldn't actually occur but better safe than sorry
+        $this->connection->exec("
             INSERT INTO s_articles_categories (articleID, categoryID)
             VALUES {$values}
             ON DUPLICATE KEY UPDATE categoryID=VALUES(categoryID), articleID=VALUES(articleID)
-        ";
+        ");
 
-        $this->connection->exec($sql);
+        // Update s_articles_categories_ro table
+        foreach ($categoryIds as $categoryId) {
+            $this->categorySubscriber->backlogAddAssignment($articleId, $categoryId);
+        }
+    }
 
-        $this->updateArticlesCategoriesRO($articleId);
+    /**
+     * Remove obsolete category assignments
+     *
+     * @param $articleId
+     * @param array $categoryIds
+     * @throws DBALException
+     */
+    protected function removeCategoryAssignments($articleId, array $categoryIds)
+    {
+        if (!$categoryIds) {
+            return;
+        }
+
+        $idList = implode(', ', $categoryIds);
+
+        $this->connection->exec("
+            DELETE FROM s_articles_categories WHERE articleID = {$articleId} AND categoryID IN ({$idList})
+        ");
+
+        // Update s_articles_categories_ro table
+        foreach ($categoryIds as $categoryId) {
+            $this->categorySubscriber->backlogRemoveAssignment($articleId, $categoryId);
+        }
     }
 
     /**
      * Checks whether a category with the given id exists
      *
+     * @param string $categoryId
      * @return bool
      */
     protected function isCategoryExists($categoryId)
@@ -232,32 +288,15 @@ class CategoryWriter
     }
 
     /**
-     * Updates s_articles_categories_ro table
-     *
-     * @param string $articleId
-     */
-    protected function updateArticlesCategoriesRO($articleId)
-    {
-        /** @var CategorySubscriber $categorySubscriber */
-        $categorySubscriber = Shopware()->CategorySubscriber();
-        foreach ($this->categoryIds as $categoryId) {
-            $categorySubscriber->backlogAddAssignment($articleId, $categoryId);
-        }
-    }
-
-    /**
      * @param array  $categories
-     * @param string $articleId
      *
-     * @return string
+     * @return array
      */
-    private function prepareValues($categories, $articleId)
+    private function prepareValues($categories)
     {
-        $this->categoryIds = [];
-        $values = implode(
-            ', ',
+        return array_filter(
             array_map(
-                function ($category) use ($articleId) {
+                function ($category) {
                     $isCategoryExists = false;
                     if (!empty($category['categoryId'])) {
                         $isCategoryExists = $this->isCategoryExists($category['categoryId']);
@@ -265,9 +304,7 @@ class CategoryWriter
 
                     //if categoryId exists, the article will be assigned to it, no matter of the categoryPath
                     if ($isCategoryExists === true) {
-                        $this->categoryIds[$category['categoryId']] = (int) $category['categoryId'];
-
-                        return "({$articleId}, {$category['categoryId']})";
+                        return $category['categoryId'];
                     }
 
                     //if categoryId does NOT exist and categoryPath is empty an error will be shown
@@ -291,15 +328,14 @@ class CategoryWriter
                             throw new AdapterException(sprintf($message, $category['categoryId']));
                         }
 
-                        $this->categoryIds[$category['categoryId']] = (int) $category['categoryId'];
-
-                        return "({$articleId}, {$category['categoryId']})";
+                        return $category['categoryId'];
                     }
-                },
-                $categories
-            )
-        );
 
-        return $values;
+                    return null;
+                },
+              $categories ?: []
+            ),
+            function ($id) { return !!$id; }
+        );
     }
 }
